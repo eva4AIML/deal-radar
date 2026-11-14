@@ -34,6 +34,7 @@ import re
 import sys
 import time
 import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 
 import socket
@@ -307,6 +308,36 @@ def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=
     return rows
 
 
+NTFY_MAX = 10  # alerts per run, so a burst never floods the phone
+DROP = "\U0001f4b8"
+
+
+def alert_rows(rows):
+    """New rows worth a phone alert: a watchlist match within max price, or cheaper than a purchase."""
+    return [r for r in rows if r[9] == "New" and ("✓" in r[8] or DROP in r[8])]
+
+
+def notify(rows):
+    """Push alert_rows to ntfy.sh/<NTFY_TOPIC>. Does nothing when the topic is not set."""
+    topic = os.environ.get("NTFY_TOPIC", "").strip()
+    sent = 0
+    for r in alert_rows(rows)[:NTFY_MAX] if topic else []:
+        drop = DROP in r[8]
+        headers = {"Title": "Deal Radar: price drop" if drop else "Deal Radar: watchlist match",
+                   "Tags": "moneybag" if drop else "bell"}
+        if r[7].isascii():  # HTTP headers must be plain ASCII
+            headers["Click"] = r[7]
+        price = f" - ${r[5]:g}" if isinstance(r[5], float) else ""
+        body = f"{r[3]}{price}\n{r[8]}".encode("utf-8")
+        try:
+            urllib.request.urlopen(urllib.request.Request(f"https://ntfy.sh/{topic}", data=body, headers=headers),
+                                   timeout=10).close()
+            sent += 1
+        except Exception as ex:  # an alert failing must never fail the run
+            print(f"Alert failed: {ex}")
+    return sent
+
+
 def fetch(url):
     return feedparser.parse(url, agent=USER_AGENT)
 
@@ -383,6 +414,8 @@ def run_once(sheet):
         first_pull = bool(row_idx) and not (src_rows[row_idx - 1] + [""] * 5)[4].strip()
         try:
             feed = fetch(url)
+            if feed.get("status", 200) >= 400:  # e.g. Reddit's 429 comes back as an empty, "valid" feed
+                raise RuntimeError(f"HTTP {feed.status}")
             if feed.bozo and not feed.entries:
                 raise RuntimeError(str(feed.bozo_exception)[:80])
             rows = entries_to_rows(name, rule, feed, watchlist, seen, known, now, first_pull, upgrades, purchases)
@@ -406,6 +439,7 @@ def run_once(sheet):
             first_new_row = int(m.group(1))
     if status_updates:
         src_ws.batch_update(status_updates)
+    alerts = notify(all_rows)  # after the append, so alerts only go out for rows that were saved
     if upgrades:
         deals.batch_update(upgrades)
     upgraded_rows = [int(u["range"][1:]) for u in upgrades if u["range"].startswith("J")]
@@ -414,7 +448,8 @@ def run_once(sheet):
     print(f"Pulled {len(feeds) - skipped} feeds ({skipped} not due yet). "
           f"Watching {len(purchases)} purchases for price drops ({copied} newly copied from Deals).")
     print(f"Added {len(all_rows)} rows ({graded} queued for Claude to grade); "
-          f"{len(upgrades) // 2} earlier rows got hot and were re-queued. Queue: {queued} rows to grade.")
+          f"{len(upgrades) // 2} earlier rows got hot and were re-queued. Queue: {queued} rows to grade. "
+          f"Phone alerts sent: {alerts}.")
 
 
 def main():

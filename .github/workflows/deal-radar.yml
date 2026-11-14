@@ -31,6 +31,7 @@ jobs:
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}   # optional: phone alerts via the ntfy app
       # GitHub turns off schedules in public repos after 60 days without commits; re-enabling resets that clock.
       - if: always() && github.event_name == 'schedule'
         run: gh api -X PUT repos/${{ github.repository }}/actions/workflows/deal-radar.yml/enable
