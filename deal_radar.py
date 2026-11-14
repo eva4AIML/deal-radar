@@ -1,8 +1,8 @@
 """
 Deal Radar collector - pulls deal RSS feeds into the "Deal Radar 2026" Google Sheet.
 
-Runs free on your own computer (no AI tokens). Claude's scheduled scans then grade the
-rows this script marks Status = New and push-alert you on the best ones.
+Runs free (no AI tokens). Rows marked Status = New are graded here by simple rules
+(see "Auto-grading" below) and the best ones are pushed to your phone via ntfy.
 
 Nothing personal is stored in this file, so it is safe in a public repo.
   - GitHub Actions: set repo secrets SHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON.
@@ -60,6 +60,15 @@ DEFAULT_MIN_HEAT = 40    # used when H is blank
 MAX_AGE_DAYS = 3         # older posts are logged as Low (often already expired)
 SKIP_UNDER = 15          # tiny-ticket deals are logged but not graded (saves tokens),
                          # unless the title has one of the source's J words (e.g. "free")
+
+# Auto-grading (free rules, no Claude). Only rows with a blank Verdict (or an earlier auto ❓) are graded;
+# every auto verdict has "auto" in the Why column so manual verdicts are easy to tell apart.
+HOT_HEAT = 100           # heat >= this: 🔥 CANNOT MISS + phone alert
+GOOD_HEAT = 50           # heat >= this: 👍 GOOD (no alert)
+GLITCH_MIN_HEAT = 25     # "price mistake/glitch/error" in title and heat >= this: 🔥 + alert
+GLITCH_RE = re.compile(r"\b(?:price|pricing)\s*(?:mistake|glitch|error)|\bglitch", re.I)
+# Plain "dead" would hit game titles like "Red Dead", so only flagged forms of it count.
+DEAD_RE = re.compile(r"\bexpired\b|\boos\b|out of stock|sold out|\[dead\]|\bdead deal\b|\bdeal (?:is )?dead\b", re.I)
 
 # Comma form needs at least one ",ddd" group; otherwise "$3461" would stop after "346".
 PRICE_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")
@@ -178,18 +187,21 @@ def load_purchases(sheet, today):
         elif deadline < today:
             continue
         keys = [w for w in re.split(r"[\s,]+", (words or item).lower()) if len(w) > 1]
-        out.append({"item": item.strip(), "store": store.strip(), "paid": price, "words": keys})
+        out.append({"item": item.strip(), "store": store.strip(), "paid": price, "words": keys,
+                    "claim_by": claim_by.strip()})
     return out
 
 
-def purchase_match(title, price, purchases):
+def find_purchase(title, price, purchases):
     if price is None:
-        return ""
+        return None
     t = title.lower()
-    for p in purchases:
-        if p["words"] and all(w in t for w in p["words"]) and price < p["paid"]:
-            return f"\U0001f4b8 Lower than your purchase: {p['item']} (paid ${p['paid']:g} at {p['store'] or '?'})"
-    return ""
+    return next((p for p in purchases if p["words"] and all(w in t for w in p["words"]) and price < p["paid"]), None)
+
+
+def purchase_match(title, price, purchases):
+    p = find_purchase(title, price, purchases)
+    return f"\U0001f4b8 Lower than your purchase: {p['item']} (paid ${p['paid']:g} at {p['store'] or '?'})" if p else ""
 
 
 def sync_bought(sheet, deals_ws, now_dt):
@@ -247,12 +259,12 @@ def write_queue(sheet, deals_ws, statuses, first_new_row, all_rows, upgraded_row
     for k, r in enumerate(all_rows):
         if r[9] == "New":
             lines.append([first_new_row + k] + r[:9])
-    lines = lines[-QUEUE_MAX:]
+    lines = lines[-QUEUE_MAX:]  # each line: Deals row number, then Deals A-I
     header = [["Deals row", "Deal ID", "Found At", "Source", "Title", "Store", "Price", "Heat", "Link",
                f"Watch Match  |  {len(lines)} rows to grade"]]
     q.batch_clear(["A1:J"])
     q.update(values=header + lines, range_name="A1", value_input_option="RAW")
-    return len(lines)
+    return lines
 
 
 def triage(rule, title, price, heat, match):
@@ -313,29 +325,78 @@ def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=
 
 NTFY_MAX = 10  # alerts per run, so a burst never floods the phone
 DROP = "\U0001f4b8"
+UNVERIFIED = "\u2753 UNVERIFIED"
 
 
-def alert_rows(rows):
-    """New rows worth a phone alert: a watchlist match within max price, or cheaper than a purchase."""
-    return [r for r in rows if r[9] == "New" and ("✓" in r[8] or DROP in r[8])]
+def grade(title, price, heat, match, purchases):
+    """Free rule-based verdict. Returns (verdict, why, alert); alert = (ntfy title, ntfy tags, message) or None."""
+    heat = heat or 0
+    if DEAD_RE.search(title):  # checked first so a dead deal never alerts
+        return "\U0001f44e BAD", "auto: title says expired / out of stock", None
+    p = find_purchase(title, price, purchases)
+    if p:
+        by = f"by {p['claim_by']}" if p["claim_by"] else "(no price-adjust policy: return and rebuy)"
+        msg = f"Claim ${p['paid'] - price:,.2f} back at {p['store'] or '?'} {by}"
+        return "\u2705 MUST BUY", f"auto price-adjust: {msg}", ("price drop", "moneybag", f"{DROP} {msg}")
+    if "\u2713" in match and price is not None:  # ✓ = within max with must-include; no price = max unchecked
+        return ("\u2705 MUST BUY", "auto: watchlist match at or under max price",
+                ("watchlist match", "bell", f"\u2705 Must Buy - watchlist: {match}"))
+    if GLITCH_RE.search(title) and heat >= GLITCH_MIN_HEAT:
+        return ("\U0001f525 CANNOT MISS", f"auto: possible price mistake, heat {heat:g} - may get cancelled",
+                ("price mistake", "rotating_light", "\U0001f525 Possible price mistake - may get cancelled"))
+    if heat >= HOT_HEAT:
+        return ("\U0001f525 CANNOT MISS", f"auto: very hot, heat {heat:g}",
+                ("hot deal", "fire", f"\U0001f525 Very hot deal (heat {heat:g})"))
+    if heat >= GOOD_HEAT:
+        return "\U0001f44d GOOD", f"auto: hot, heat {heat:g}", None
+    return UNVERIFIED, "auto", None  # never 🟢 All-Time Low: we have no price history
 
 
-def notify(rows):
-    """Push alert_rows to ntfy.sh/<NTFY_TOPIC>. Does nothing when the topic is not set."""
+def is_auto_unverified(verdict, why):
+    return verdict.startswith("\u2753") and why.startswith("auto")
+
+
+def cell(col, row):
+    return col[row - 1] if row - 1 < len(col) else ""
+
+
+def auto_grade(lines, verdicts, whys, alerted, purchases, now_dt):
+    """Grade Queue lines ([row, A..I]) whose Verdict is blank or an earlier auto ❓; manual verdicts are never touched.
+    Returns (sheet updates, alerts). Alerts skip rows already alerted (column P) or found too long ago."""
+    updates, alerts = [], []
+    for ln in lines:
+        row, title, price, heat, link, match = ln[0], str(ln[4]), num(ln[6]), num(ln[7]), str(ln[8]), str(ln[9])
+        old_v, old_why = cell(verdicts, row), cell(whys, row)
+        if old_v.strip() and not is_auto_unverified(old_v, old_why):
+            continue
+        verdict, why, alert = grade(title, price, heat, match, purchases)
+        updates.append({"range": f"J{row}:K{row}", "values": [["Scored", verdict]]})
+        updates.append({"range": f"O{row}", "values": [[why]]})
+        try:
+            found = datetime.strptime(str(ln[2])[:16], "%Y-%m-%d %H:%M")
+            fresh = now_dt.replace(tzinfo=None) - found <= timedelta(days=MAX_AGE_DAYS)
+        except ValueError:
+            fresh = False
+        if alert and fresh and not cell(alerted, row).strip():
+            alerts.append({"row": row, "title": title, "price": price, "link": link,
+                           "kind": alert[0], "tags": alert[1], "msg": alert[2]})
+    return updates, alerts
+
+
+def notify(alerts):
+    """Push alerts to ntfy.sh/<NTFY_TOPIC>. Does nothing when the topic is not set. Returns the rows sent."""
     topic = os.environ.get("NTFY_TOPIC", "").strip()
-    sent = 0
-    for r in alert_rows(rows)[:NTFY_MAX] if topic else []:
-        drop = DROP in r[8]
-        headers = {"Title": "Deal Radar: price drop" if drop else "Deal Radar: watchlist match",
-                   "Tags": "moneybag" if drop else "bell"}
-        if r[7].isascii():  # HTTP headers must be plain ASCII
-            headers["Click"] = r[7]
-        price = f" - ${r[5]:g}" if isinstance(r[5], float) else ""
-        body = f"{r[3]}{price}\n{r[8]}".encode("utf-8")
+    sent = []
+    for a in alerts[:NTFY_MAX] if topic else []:
+        headers = {"Title": f"Deal Radar: {a['kind']}", "Tags": a["tags"]}
+        if a["link"].isascii():  # HTTP headers must be plain ASCII
+            headers["Click"] = a["link"]
+        price = f" - ${a['price']:g}" if a["price"] is not None else ""
+        body = f"{a['title']}{price}\n{a['msg']}".encode("utf-8")
         try:
             urllib.request.urlopen(urllib.request.Request(f"https://ntfy.sh/{topic}", data=body, headers=headers),
                                    timeout=10).close()
-            sent += 1
+            sent.append(a["row"])
         except Exception as ex:  # an alert failing must never fail the run
             print(f"Alert failed: {ex}")
     return sent
@@ -378,11 +439,14 @@ def run_once(sheet):
     ids = deals.col_values(1)
     seen = set(ids[1:])
     heats, links, statuses = deals.col_values(7), deals.col_values(8), deals.col_values(10)
+    verdicts, whys, alerted = deals.col_values(11), deals.col_values(15), deals.col_values(16)
     known = {}  # same-deal key -> [sheet row, status, heat]
     for i, link in enumerate(links[1:], start=2):
         if link:
-            known[same_deal_key(link)] = [i, statuses[i - 1] if i - 1 < len(statuses) else "",
-                                          heats[i - 1] if i - 1 < len(heats) else ""]
+            st = cell(statuses, i)
+            if is_auto_unverified(cell(verdicts, i), cell(whys, i)):
+                st = "Low"  # an auto ❓ that gets hot later is re-queued and re-graded, like a Low row
+            known[same_deal_key(link)] = [i, st, cell(heats, i)]
     upgrades = []
     copied = sync_bought(sheet, deals, now_dt)
     purchases = load_purchases(sheet, now_dt.date())
@@ -456,18 +520,23 @@ def run_once(sheet):
             first_new_row = int(m.group(1))
     if status_updates:
         src_ws.batch_update(status_updates)
-    alerts = notify(all_rows)  # after the append, so alerts only go out for rows that were saved
     # Read row numbers BEFORE batch_update: gspread rewrites each range in place ("J12" -> "'Deals'!J12").
     upgraded_rows = [int(u["range"][1:]) for u in upgrades if u["range"].startswith("J")]
     if upgrades:
         deals.batch_update(upgrades)
-    queued = write_queue(sheet, deals, statuses, first_new_row, all_rows, upgraded_rows)
+    lines = write_queue(sheet, deals, statuses, first_new_row, all_rows, upgraded_rows)
+    grades, alerts = auto_grade(lines, verdicts, whys, alerted, purchases, now_dt)
+    if grades:  # verdicts are saved before alerting, so a failed run can never alert the same deal twice
+        deals.batch_update(grades, value_input_option="RAW")
+    sent = notify(alerts)
+    if sent:
+        deals.batch_update([{"range": f"P{r}", "values": [[now]]} for r in sent])
     graded = sum(1 for r in all_rows if r[9] == "New")
     print(f"Pulled {len(feeds) - skipped} feeds ({skipped} not due yet). "
           f"Watching {len(purchases)} purchases for price drops ({copied} newly copied from Deals).")
-    print(f"Added {len(all_rows)} rows ({graded} queued for Claude to grade); "
-          f"{len(upgrades) // 2} earlier rows got hot and were re-queued. Queue: {queued} rows to grade. "
-          f"Phone alerts sent: {alerts}.")
+    print(f"Added {len(all_rows)} rows ({graded} worth grading); "
+          f"{len(upgrades) // 2} earlier rows got hot and were re-queued. Queue: {len(lines)} rows. "
+          f"Auto-graded {len(grades) // 2} rows. Phone alerts sent: {len(sent)} of {len(alerts)}.")
 
 
 def main():
