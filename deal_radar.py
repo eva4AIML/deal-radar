@@ -339,6 +339,8 @@ def notify(rows):
 
 
 def fetch(url):
+    if "reddit.com" in url and "limit=" not in url:
+        url += ("&" if "?" in url else "?") + "limit=100"  # each Reddit feed gets one turn per ~2 h, so take a long page
     return feedparser.parse(url, agent=USER_AGENT)
 
 
@@ -406,12 +408,24 @@ def run_once(sheet):
                       f"https://slickdeals.net/newsearch.php?q={q}&searcharea=deals&searchin=title&rss=1",
                       make_rule([])))
 
+    def last_pulled(i):
+        return (src_rows[i - 1] + [""] * 5)[4]
+
+    # Logged-out Reddit allows ~1 request a minute per IP, so pull ONE Reddit feed per run:
+    # the due one waiting longest (blank = never pulled sorts first).
+    reddit_due = [(last_pulled(i), i) for i, _, u, rule in feeds
+                  if i and "reddit.com" in u and due(rule, last_pulled(i), now_dt)]
+    reddit_pick = min(reddit_due)[1] if reddit_due else None
+
     all_rows, status_updates, skipped = [], [], 0
     for row_idx, name, url, rule in feeds:
-        if row_idx and not due(rule, (src_rows[row_idx - 1] + [""] * 5)[4], now_dt):
+        if row_idx and not due(rule, last_pulled(row_idx), now_dt):
             skipped += 1
             continue
-        first_pull = bool(row_idx) and not (src_rows[row_idx - 1] + [""] * 5)[4].strip()
+        if "reddit.com" in url and row_idx != reddit_pick:
+            skipped += 1
+            continue
+        first_pull = bool(row_idx) and not last_pulled(row_idx).strip()
         try:
             feed = fetch(url)
             if feed.get("status", 200) >= 400:  # e.g. Reddit's 429 comes back as an empty, "valid" feed
