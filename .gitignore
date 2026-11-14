@@ -1,0 +1,4 @@
+service_account.json
+sheet_id.txt
+*.json
+__pycache__/

@@ -1,0 +1,38 @@
+# GitHub Actions workflow: runs the Deal Radar collector in the cloud (no laptop needed).
+# Put this file at .github/workflows/deal-radar.yml, with deal_radar.py in the repo root.
+# The repo can be PUBLIC - nothing personal is in the code. Add two secrets under
+# Settings > Secrets and variables > Actions > New repository secret:
+#   SHEET_ID                      the long ID from the Google Sheet URL (between /d/ and /edit)
+#   GOOGLE_SERVICE_ACCOUNT_JSON   the whole service_account.json file contents
+# Secrets are encrypted and never shown in logs. Public repos have unlimited free minutes.
+# Note: GitHub can start scheduled runs 5-15 min late when busy; that is normal.
+name: Deal Radar collector
+on:
+  schedule:
+    - cron: "2,17,32,47 * * * *"   # every 15 minutes (off the busy :00 mark)
+  workflow_dispatch: {}        # lets you run it by hand from the Actions tab
+permissions:
+  contents: read
+  actions: write        # only for the keepalive step below
+concurrency:            # never run two collectors at once
+  group: deal-radar
+  cancel-in-progress: false
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install feedparser gspread google-auth
+      - run: python deal_radar.py --once
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      # GitHub turns off schedules in public repos after 60 days without commits; re-enabling resets that clock.
+      - if: always() && github.event_name == 'schedule'
+        run: gh api -X PUT repos/${{ github.repository }}/actions/workflows/deal-radar.yml/enable
+        env:
+          GH_TOKEN: ${{ github.token }}
