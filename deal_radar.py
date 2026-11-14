@@ -61,7 +61,8 @@ MAX_AGE_DAYS = 3         # older posts are logged as Low (often already expired)
 SKIP_UNDER = 15          # tiny-ticket deals are logged but not graded (saves tokens),
                          # unless the title has one of the source's J words (e.g. "free")
 
-PRICE_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")
+# Comma form needs at least one ",ddd" group; otherwise "$3461" would stop after "346".
+PRICE_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")
 THUMBS_RE = re.compile(r"Thumb Score:\s*\+?(-?\d+)", re.I)
 STORE_RE = re.compile(r"^\s*([A-Z][\w.&' +-]{1,40}?)\s+(?:has|is offering|offers)\b")
 TAG_RE = re.compile(r"<[^>]+>")
@@ -286,7 +287,9 @@ def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=
         stale = pub is not None and calendar.timegm(pub) < cutoff
         if did in seen or (key and key in known):
             k = known.get(key)
-            if (upgrades is not None and k and k[0] and k[1] == "Low" and heat is not None and not stale
+            price = parse_price(clean(e.get("title", "")))
+            cheap = price is not None and price < SKIP_UNDER  # tiny-ticket deals stay Low even when hot
+            if (upgrades is not None and k and k[0] and k[1] == "Low" and heat is not None and not stale and not cheap
                     and rule["min_heat"] is not None and heat >= rule["min_heat"] > (num(k[2]) or 0)):
                 upgrades.append({"range": f"G{k[0]}", "values": [[heat]]})
                 upgrades.append({"range": f"J{k[0]}", "values": [["New"]]})
