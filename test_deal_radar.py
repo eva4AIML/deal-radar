@@ -56,6 +56,10 @@ def test_rule2_watchlist_match_is_must_buy():
 
 def test_rule3_heat_tiers():
     v, _, alert = _grade("TV $500", 500, d.HOT_HEAT)
+    assert v.startswith("\U0001f525") and alert is None  # 🔥 in the sheet, but no alert below ALERT_HEAT
+    v, _, alert = _grade("TV $500", 500, d.ALERT_HEAT - 1)
+    assert v.startswith("\U0001f525") and alert is None
+    v, _, alert = _grade("TV $500", 500, d.ALERT_HEAT)
     assert v.startswith("\U0001f525") and alert
     v, _, alert = _grade("TV $500", 500, d.GOOD_HEAT)
     assert v == "\U0001f44d GOOD" and alert is None
@@ -84,8 +88,8 @@ def _line(row, title, heat, found="2026-11-14 10:00"):
 
 def test_auto_grade_keeps_manual_verdicts_and_never_realerts():
     now = d.datetime(2026, 11, 14, 12, 0)
-    lines = [_line(2, "Hot TV", 200), _line(3, "Hot TV", 200), _line(4, "Hot TV", 200), _line(5, "Hot TV", 10),
-             _line(6, "Hot TV", 200, found="2026-11-01 10:00")]
+    lines = [_line(2, "Hot TV", 300), _line(3, "Hot TV", 300), _line(4, "Hot TV", 300), _line(5, "Hot TV", 10),
+             _line(6, "Hot TV", 300, found="2026-11-01 10:00")]
     verdicts = ["Verdict", "", "⏳ WAIT", "", d.UNVERIFIED, ""]
     whys = ["Why", "", "manual", "", "auto", ""]
     alerted = ["Alerted", "", "", "2026-11-14 11:00", "", ""]

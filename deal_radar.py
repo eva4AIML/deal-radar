@@ -63,7 +63,8 @@ SKIP_UNDER = 15          # tiny-ticket deals are logged but not graded (saves to
 
 # Auto-grading (free rules, no Claude). Only rows with a blank Verdict (or an earlier auto ❓) are graded;
 # every auto verdict has "auto" in the Why column so manual verdicts are easy to tell apart.
-HOT_HEAT = 100           # heat >= this: 🔥 CANNOT MISS + phone alert
+HOT_HEAT = 100           # heat >= this: 🔥 CANNOT MISS
+ALERT_HEAT = 300         # heat >= this also sends a phone alert (100-299 is 🔥 in the sheet only)
 GOOD_HEAT = 50           # heat >= this: 👍 GOOD (no alert)
 GLITCH_MIN_HEAT = 25     # "price mistake/glitch/error" in title and heat >= this: 🔥 + alert
 GLITCH_RE = re.compile(r"\b(?:price|pricing)\s*(?:mistake|glitch|error)|\bglitch", re.I)
@@ -346,7 +347,7 @@ def grade(title, price, heat, match, purchases):
                 ("price mistake", "rotating_light", "\U0001f525 Possible price mistake - may get cancelled"))
     if heat >= HOT_HEAT:
         return ("\U0001f525 CANNOT MISS", f"auto: very hot, heat {heat:g}",
-                ("hot deal", "fire", f"\U0001f525 Very hot deal (heat {heat:g})"))
+                ("hot deal", "fire", f"\U0001f525 Extreme heat deal (heat {heat:g})") if heat >= ALERT_HEAT else None)
     if heat >= GOOD_HEAT:
         return "\U0001f44d GOOD", f"auto: hot, heat {heat:g}", None
     return UNVERIFIED, "auto", None  # never 🟢 All-Time Low: we have no price history
