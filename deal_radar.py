@@ -457,9 +457,10 @@ def run_once(sheet):
     if status_updates:
         src_ws.batch_update(status_updates)
     alerts = notify(all_rows)  # after the append, so alerts only go out for rows that were saved
+    # Read row numbers BEFORE batch_update: gspread rewrites each range in place ("J12" -> "'Deals'!J12").
+    upgraded_rows = [int(u["range"][1:]) for u in upgrades if u["range"].startswith("J")]
     if upgrades:
         deals.batch_update(upgrades)
-    upgraded_rows = [int(u["range"][1:]) for u in upgrades if u["range"].startswith("J")]
     queued = write_queue(sheet, deals, statuses, first_new_row, all_rows, upgraded_rows)
     graded = sum(1 for r in all_rows if r[9] == "New")
     print(f"Pulled {len(feeds) - skipped} feeds ({skipped} not due yet). "
