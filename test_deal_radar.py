@@ -100,6 +100,25 @@ def test_new_history_rows_logs_each_watch_deal_once():
     assert d.match_keyword("nano puff ✓ (no max)") == "nano puff" and d.match_keyword("\U0001f4b8 Lower than") == ""
 
 
+def test_categorize_by_title_then_feed():
+    assert d.categorize("Apple AirPods Pro 3 $199") == "Apple"
+    assert d.categorize("Carter's Girls Fleece Pajamas $8") == "Kids & Toys"
+    assert d.categorize("Patagonia Women's Nano Puff Jacket $113") == "Clothing & Shoes"
+    assert d.categorize("Hotel Grand White Down Comforter King $99.99") == "Furniture & Bedding"
+    assert d.categorize("Sleep Number Mattresses: free delivery") == "Furniture & Bedding"  # plural matched
+    assert d.categorize("TCL 98 inch QLED TV") == "Electronics"
+    assert d.categorize("Mystery deal of the day", "Beauty") == "Beauty"  # feed category fallback
+    assert d.categorize("Mystery deal of the day", "") == d.OTHER
+
+
+def test_my_list_names():
+    lists = {"fleece": "Sarah PJs"}
+    assert d.my_list("fleece ✓", lists) == "Sarah PJs"
+    assert d.my_list("nano puff (over max $150)", lists) == "Nano Puff"
+    assert d.my_list("\U0001f4b8 Lower than your purchase: TV", lists) == "\U0001f4b8 My purchases"
+    assert d.my_list("", lists) == ""
+
+
 def test_rule3_heat_tiers():
     v, _, alert = _grade("TV $500", 500, d.HOT_HEAT)
     assert v.startswith("\U0001f525") and alert is None  # 🔥 in the sheet, but no alert below ALERT_HEAT

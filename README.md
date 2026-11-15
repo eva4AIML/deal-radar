@@ -1,7 +1,7 @@
 # Deal Radar 2026 — always-on deal scanner (for Claude and for Eva/Sumit)
 
 Live list: Google Sheet "Deal Radar 2026" (private; ID kept in the GitHub secret SHEET_ID).
-Tabs: Deals (A Deal ID … R Bought?), Price History (keyword, date, price, store, title, deal ID, link, note), Watchlist (keyword, max price, must, exclude, notes, Active Y/N), Sources (feeds + rules), How it works.
+Tabs: Deals (A Deal ID … R Bought?, S Category, T My List), Price History (keyword, date, price, store, title, deal ID, link, note), Watchlist (keyword, max price, must, exclude, notes, Active Y/N, List name), Sources (feeds + rules), How it works.
 
 ## Architecture (built to save tokens)
 1. COLLECT — deal_radar.py (Python, feedparser + gspread). Free; no AI. Runs on GitHub Actions in a PUBLIC repo (deal-radar.yml, every 15 min; unlimited free minutes). ~208 sources. Sources K 'Every (min)': main feeds + Amazon/Best Buy/Walmart/Target searches every run; category searches every 60 min; Reddit every 30. Normal run ≈ 1 min, hourly run ≈ 7 min (timeout 14, never two at once). Times are written in Eastern.
@@ -10,6 +10,7 @@ Tabs: Deals (A Deal ID … R Bought?), Price History (keyword, date, price, stor
    - Triage per source (Sources G Category, H Min heat (blank = 40), I Min price, J "Grade if title has" words): New if watchlist match, title word, heat ≥ H, or price ≥ I. Price never filters: every deal found is written to Deals and cheap deals are graded like any other. Posts > 3 days old = Low (even watchlist matches); a feed's first-ever pull = Low except watchlist matches (no backlog flood).
    - Heat re-check: a Low row whose Slickdeals heat later crosses its source's Min heat (post < 3 days old) is flipped to New once — catches deals that get hot after we first saw them.
    - Heat = Slickdeals thumb score, read from the feed's full content (fixed Nov 14 — it was always blank before).
+   - Category (S) from the title via CATEGORY_RULES (15 groups), else the feed's Sources G category; My List (T) = Watchlist G list name of the matched keyword. Blank S cells are backfilled once per run (self-healing).
    - Logs never print watchlist keywords (public repo).
 2. GRADE (free, no AI) — the collector auto-grades every queued row whose Verdict is blank (never overwrites a manual verdict) and writes "auto…" in Why, Status = Scored. Rules, in order (thresholds are constants at the top of deal_radar.py):
    - Title says expired / OOS / out of stock / sold out / [dead] → 👎 BAD (checked first, so dead deals never alert).

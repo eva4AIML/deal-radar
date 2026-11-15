@@ -196,6 +196,88 @@ def watch_alert(verdict, key, detail):
     return ("watchlist: " + key, "bell", f"{verdict} - {detail.removeprefix('auto: ').removeprefix('auto history: ')}")
 
 
+# ---------- Category (column S) and My List (column T) ----------
+# Category = what the product IS (from the title), so the sheet can be filtered. Order matters: first match wins.
+CATEGORY_RULES = [  # singular words: a plural "s"/"es" is matched automatically
+    ("Apple", r"iphone|ipad|macbook|imac|mac ?mini|mac studio|airpods?|apple ?watch|apple ?tv|airtag|homepod|apple pencil|beats"),
+    ("Beauty", r"makeup|foundation|concealer|mascara|lipstick|lip gloss|serum|moisturi[sz]er|skin ?care|skin tint|perfume|parfum|fragrance|cologne|eau de|shampoo|conditioner|hair ?dryer|airwrap|curling|flat iron|hair removal|sephora|ulta|lotion|sunscreen|razor|shaver|toothbrush|waterpik|nail polish|cosmetic|beauty"),
+    ("Kids & Toys", r"lego|toy|kids?'?s?|girls?'?|boys?'?|baby|babies|toddler|infant|stroller|crib|car seat|diaper|nerf|barbie|hot wheels|play-?doh|squishmallow|pok[eé]mon|plush|craft|michaels|hobby lobby"),
+    ("Jewelry & Gold", r"gold (?:bar|coin|eagle|buffalo)|silver (?:bar|coin|eagle|round)|bullion|jewelry|jewellery|necklace|earring|bracelet|pendant"),
+    ("Clothing & Shoes", r"jacket|coat|hoodie|hoody|fleece|sweater|sweatshirt|t-?shirt|tee|polo|jeans|pant|jogger|short|dress|sock|underwear|bra|pajama|pj|sleepwear|sneaker|shoe|boot|sandal|slipper|glove|beanie|scarf|tights|puffer|vest|legging|apparel|clothing|eyeglass|eyewear|sunglass|nano puff|thermoball|better sweater|patagonia|north face|columbia|nike|adidas|levi'?s|ugg|croc"),
+    ("Tools & Auto", r"drill|impact driver|saw|screwdriver|tool|dewalt|milwaukee|ryobi|makita|craftsman|ego power|tire|motor oil|dash ?cam|jump starter|wiper|ev charger|carplay|android auto|car (?:vacuum|charger|mount|wash)|automotive|auto parts|lawn|mower|snow ?blower|leaf blower|trimmer|pressure washer|chainsaw|ladder"),
+    ("Furniture & Bedding", r"sofa|couch|sectional|recliner|mattress|bed ?frame|headboard|comforter|duvet|sheet set|bed sheet|pillow|blanket|throw|quilt|desk|chair|stool|table|dresser|nightstand|bookshel(?:f|ve)|cabinet|rug|curtain|furniture|hotel grand"),
+    ("Appliances", r"refrigerator|fridge|washer|dryer|dishwasher|range|oven|cooktop|microwave|freezer|vacuum|vac|roomba|air purifier|humidifier|dehumidifier|air conditioner|space heater|heater|ice maker|water heater|garbage disposal"),
+    ("Electronics", r"tv|oled|qled|television|monitor|laptop|notebook|chromebook|tablet|smartphone|phone|galaxy|pixel|headphone|earbud|speaker|soundbar|camera|cam|ssd|hard drive|nvme|flash drive|micro ?sd|router|modem|mesh|wi-?fi|charger|power bank|portable power|power station|generator|switch 2|nintendo|playstation|ps5|xbox|steam deck|gpu|graphics card|rtx|cpu|processor|motherboard|ram|ddr5|keyboard|mouse|webcam|smart ?watch|fitbit|garmin|kindle|echo|alexa|fire tv|roku|chromecast|printer|3d printer|projector|drone|gaming|video game|game|vr|meta quest|blu-?ray|dvd|electronic"),
+    ("Home & Kitchen", r"air fryer|instant pot|pressure cooker|blender|coffee maker|espresso|keurig|nespresso|ninja|kitchenaid|stand mixer|cookware|skillet|dutch oven|knife|knives|kitchen|grill|griddle|smoker|traeger|candle|decor|ornament|christmas tree|wreath|string light|storage|organizer|towel|shower|bath|bathroom|doorbell|smart plug|light bulb|lamp|heating pad|safe|first aid|home"),
+    ("Sports & Outdoor", r"bike|bicycle|e-?bike|treadmill|dumbbell|kettlebell|weight|yoga|exercise|fitness|peloton|camping|tent|sleeping bag|kayak|golf|fishing|hiking|backpack|cooler|yeti|stanley|hydro ?flask|ski|snowboard|scooter|trampoline|basketball|soccer|insole|outdoor"),
+    ("Grocery & Household", r"grocery|groceries|snack|coffee bean|ground coffee|k-?cup|tea|paper towel|toilet paper|tissue|detergent|tide|dishwasher pod|cleaning|cleaner|clorox|lysol|trash bag|ziploc|vitamin|supplement|protein|water bottle|sparkling water|soda|cereal|chocolate|candy|food|pet food|dog|cat|litter|treat|costco|sam'?s club|publix|kroger|aldi|cvs|walgreens|household"),
+    ("Money & Services", r"gift ?card|cash ?back|cashback|bank|checking|saving|credit card|bonus|reward|subscription|streaming|netflix|disney\+|hulu|peacock|paramount|spotify|youtube|software|vpn|antivirus|office 365|microsoft 365|course|udemy|coursera|ebook|audiobook|audible|kindle unlimited|phone plan|mint mobile|wireless plan|internet|insurance|membership|app|free trial|refinance|mortgage|tax|amex offer"),
+    ("Travel & Fun", r"flight|airfare|hotel|resort|cruise|vacation|luggage|suitcase|carry-?on|ticket|concert|theme park|disney world|universal|rental car|car rental|airbnb|travel"),
+]
+CATEGORY_RES = [(name, re.compile(r"(?<![a-z])(?:" + pat + r")(?:e?s)?(?![a-z])", re.I)) for name, pat in CATEGORY_RULES]
+# Fallback when the title gives no clue: the feed's own category (Sources G) mapped to the same groups.
+SOURCE_CATEGORY = {
+    "tech/apple": "Apple", "gold/silver/jewelry": "Jewelry & Gold", "beauty": "Beauty", "toys/kids": "Kids & Toys",
+    "household/kids": "Kids & Toys", "clothing/shoes": "Clothing & Shoes", "furniture/mattress": "Furniture & Bedding",
+    "bedding": "Furniture & Bedding", "major appliances": "Appliances", "kitchen": "Home & Kitchen", "home": "Home & Kitchen",
+    "home/garden": "Home & Kitchen", "holiday decor": "Home & Kitchen", "tech/general": "Electronics",
+    "tech/phones": "Electronics", "computers": "Electronics", "electronics": "Electronics", "audio": "Electronics",
+    "networking": "Electronics", "wearables": "Electronics", "gaming": "Electronics", "backup power": "Electronics",
+    "car tech": "Tools & Auto", "power tools": "Tools & Auto", "auto": "Tools & Auto", "cars": "Tools & Auto",
+    "sports/outdoor": "Sports & Outdoor", "grocery/warehouse": "Grocery & Household",
+    "local grocery/pharmacy": "Grocery & Household", "household/coupons": "Grocery & Household", "pets": "Grocery & Household",
+    "health products": "Grocery & Household", "food/dining": "Grocery & Household", "eyewear": "Clothing & Shoes",
+    "money": "Money & Services", "services": "Money & Services", "cashback/gift cards": "Money & Services",
+    "books/streaming/software": "Money & Services", "online courses": "Money & Services", "office": "Electronics",
+    "travel": "Travel & Fun", "luggage/bags": "Travel & Fun", "tickets/fun": "Travel & Fun", "games/crafts": "Kids & Toys",
+}
+OTHER = "Other"
+
+
+def categorize(title, source_category=""):
+    for name, rx in CATEGORY_RES:
+        if rx.search(title or ""):
+            return name
+    return SOURCE_CATEGORY.get((source_category or "").strip().lower(), OTHER)
+
+
+def my_list(match, lists):
+    """Column T: which of your lists a deal belongs to (Watchlist column G), e.g. 'Sarah PJs'."""
+    if not match:
+        return ""
+    if match.startswith("\U0001f4b8"):
+        return "\U0001f4b8 My purchases"
+    key = match_keyword(match)
+    return lists.get(key) or key.title()
+
+
+def backfill_categories(deals_ws, src_rows, lists):
+    """One-time (self-healing) fill of Category/My List for rows that have none. Reads S first, so later runs
+    that find no blanks cost one column read."""
+    if deals_ws.col_count < 20:
+        deals_ws.add_cols(20 - deals_ws.col_count)
+    head = deals_ws.row_values(1)
+    if len(head) < 20 or head[18] != "Category":
+        deals_ws.update(values=[["Category", "My List"]], range_name="S1:T1")
+    cats = deals_ws.col_values(19)
+    n = len(deals_ws.col_values(1))
+    if n < 2 or (len(cats) >= n and all(c.strip() for c in cats[1:n])):
+        return 0
+    titles, sources, matches, lists_col = (deals_ws.col_values(4), deals_ws.col_values(3),
+                                           deals_ws.col_values(9), deals_ws.col_values(20))
+    src_cat = {r[0]: (r + [""] * 7)[6] for r in src_rows[1:] if r}
+    out, filled = [], 0
+    for i in range(2, n + 1):
+        c, t = cell(cats, i), cell(lists_col, i)
+        if not c.strip():
+            c = categorize(cell(titles, i), src_cat.get(cell(sources, i), ""))
+            t = t or my_list(cell(matches, i), lists)
+            filled += 1
+        out.append([c, t])
+    deals_ws.update(values=out, range_name=f"S2:T{n}", value_input_option="RAW")
+    return filled
+
+
 def new_history_rows(lines, history, today):
     """Rows to append to Price History: every graded watchlist match with a price that is not logged yet."""
     logged = {h["id"] for hs in history.values() for h in hs if h["id"]}
@@ -366,7 +448,8 @@ def triage(rule, title, price, heat, match):
     return "Low"
 
 
-def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=False, upgrades=None, purchases=()):
+def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=False, upgrades=None, purchases=(),
+                    lists=None):
     """known: same-deal key -> [sheet row, status, heat] for rows already in Deals.
     A Low row whose heat later crosses this source's Min heat (while still fresh) is
     flipped to New, so deals that get hot after we first saw them are not missed."""
@@ -397,7 +480,8 @@ def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=
         if status == "New" and (stale or (first_pull and not match)):
             status = "Low"  # old post (likely expired), or backlog from a brand-new feed: log, don't grade
         rows.append([did, now, source, title[:200], parse_store(summary, link), price if price is not None else "",
-                     heat if heat is not None else "", link, match, status, "", "", "", "", "", "", "", ""])
+                     heat if heat is not None else "", link, match, status, "", "", "", "", "", "", "", "",
+                     categorize(title, rule["category"]), my_list(match, lists or {})])
         seen.add(did)
         if key:
             known[key] = [None, status, heat]  # row number unknown until appended; no upgrade this run
@@ -537,8 +621,11 @@ def run_once(sheet):
 
     wl_rows = sheet.worksheet("Watchlist").get_all_values()[1:]
     watchlist = []
+    lists = {}  # watch keyword -> list name (Watchlist column G, e.g. "Jackets", "Sarah PJs")
     for r in wl_rows:
-        r = (r + [""] * 6)[:6]
+        r = (r + [""] * 7)[:7]
+        if r[0].strip() and r[6].strip():
+            lists[r[0].strip().lower()] = r[6].strip()
         if r[0].strip() and r[5].strip().upper() == "Y":
             try:
                 mx = float(str(r[1]).replace("$", "").replace(",", "")) if r[1] else None
@@ -551,6 +638,7 @@ def run_once(sheet):
     if len(src_rows[0]) < 5 or src_rows[0][4] != "Last pulled":
         src_ws.update_acell("E1", "Last pulled")
         src_ws.update_acell("F1", "New items last pull")
+    backfilled = backfill_categories(deals, src_rows, lists)
     feeds = [(i, r[0], r[1], make_rule(r)) for i, r in enumerate(src_rows[1:], start=2)
              if len(r) > 3 and r[1].startswith("http") and r[3].strip().upper() == "Y"]
     for w in watchlist:  # one Slickdeals title search per active watchlist keyword
@@ -583,7 +671,7 @@ def run_once(sheet):
                 raise RuntimeError(f"HTTP {feed.status}")
             if feed.bozo and not feed.entries:
                 raise RuntimeError(str(feed.bozo_exception)[:80])
-            rows = entries_to_rows(name, rule, feed, watchlist, seen, known, now, first_pull, upgrades, purchases)
+            rows = entries_to_rows(name, rule, feed, watchlist, seen, known, now, first_pull, upgrades, purchases, lists)
             all_rows.extend(rows)
             msg = (now, len(rows))
             print(f"OK   {log_name(row_idx, name)}: {len(feed.entries)} items, {len(rows)} new")
@@ -624,7 +712,7 @@ def run_once(sheet):
           f"Watching {len(purchases)} purchases for price drops ({copied} newly copied from Deals).")
     print(f"Added {len(all_rows)} rows ({graded} worth grading); "
           f"{len(upgrades) // 2} earlier rows got hot and were re-queued. Queue: {len(lines)} rows. "
-          f"Auto-graded {len(grades) // 2} rows. Price history +{len(hist_rows)}. "
+          f"Auto-graded {len(grades) // 2} rows. Price history +{len(hist_rows)}. Categories backfilled: {backfilled}. "
           f"Phone alerts sent: {len(sent)} of {len(alerts)}.")
 
 
