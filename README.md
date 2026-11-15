@@ -39,6 +39,7 @@ Off: Ben's Bargains (403 to bots), flight feeds (Travel project). Tested and rej
 ## Collector setup (one time)
 - Google Cloud → enable Sheets API → service account → JSON key. Share the sheet with the service account email as Editor. Keep the sheet private.
 - GitHub: new PUBLIC repo with deal_radar.py and .gitignore in the root and .github/workflows/deal-radar.yml. Secrets: GOOGLE_SERVICE_ACCOUNT_JSON (whole JSON) and SHEET_ID. Run once from the Actions tab.
+- Runs every 15 min via Google Apps Script 'Deal Radar trigger' (Eva's Google account) calling workflow_dispatch; GitHub cron kept as backup; token = fine-grained 'deal-radar-trigger' (Actions R/W, deal-radar only), no expiration (revoke at github.com/settings/personal-access-tokens if ever leaked).
 - Or laptop: `pip install feedparser gspread google-auth tzdata`, put service_account.json + sheet_id.txt next to the script, `python deal_radar.py --once`, schedule every 15 min.
 - Reddit sometimes rate-limits cloud IPs; if those rows show ERROR in Sources!E, set them Active = N.
 
