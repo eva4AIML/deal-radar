@@ -73,18 +73,20 @@ def test_history_tiers_vs_lowest_seen():
     assert _hgrade(102)[0] == "\U0001f7e2 ALL-TIME LOW"                     # within 2%
     assert _hgrade(104)[0] == "✅ MUST BUY" and _hgrade(104)[2]             # within 5%
     v, why, alert = _hgrade(115)
-    assert v == "⏳ WAIT" and alert is None and "15% above the lowest seen $100 at Target" in why
+    assert v == "⏳ WAIT" and alert and "15% above the lowest seen $100 at Target" in why
 
 
-def test_history_over_max_is_graded_but_never_alerts():
+def test_every_watchlist_match_alerts_even_over_max_or_no_price():
     v, why, alert = _hgrade(85, match="lego (over max $80)")
-    assert v.startswith("\U0001f525") and alert is None and "over your max $80" in why
+    assert v.startswith("\U0001f525") and alert and "over your max $80" in why and "over your max" in alert[2]
+    v, _, alert = d.grade("LEGO sale", None, 0, "lego ✓", [], HIST, "z")
+    assert v == d.UNVERIFIED and alert and alert[0] == "watchlist: lego"
 
 
 def test_history_ignores_the_deal_itself_and_no_max_without_history_is_unverified():
     assert _hgrade(118, did="a")[0] == "\U0001f7e2 ALL-TIME LOW"  # its own $100 row is ignored: only $120 left
     v, why, alert = d.grade("Fleece PJ $9", 9, 0, "fleece ✓" + d.NO_MAX, [], {}, "x")
-    assert v == d.UNVERIFIED and alert is None and "no history yet" in why
+    assert v == d.UNVERIFIED and alert and "no history yet" in why
 
 
 def test_new_history_rows_logs_each_watch_deal_once():

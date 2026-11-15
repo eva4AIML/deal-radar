@@ -57,7 +57,7 @@ USER_AGENT = "DealRadar/1.0 (personal deal tracker)"
 # J "Grade if title has" (comma list), K Every (min) = how often to pull it (blank = every run). A row is queued for Claude (Status New) when it matches
 # the Watchlist (any price), or heat >= H, or price >= I, or its title contains a J word. Otherwise "Low".
 # Price never filters a deal out: every deal found is written to Deals, and cheap deals are graded like any other.
-# Watchlist max price is now only a cap: matches over it are still graded and logged, but never alert.
+# Every watchlist match is graded and alerted (with its verdict), whatever the price; max price only shows in Why.
 DEFAULT_MIN_HEAT = 40    # used when H is blank
 MAX_AGE_DAYS = 3         # older posts are logged as Low (often already expired)
 
@@ -171,9 +171,10 @@ def history_grade(price, match, did, history):
     prior = [h for h in history.get(key, []) if not (did and h["id"] == did)]
     if not prior:
         if over or NO_MAX in match:
-            return UNVERIFIED, f"auto: first price seen for '{key}', no history yet{cap}", None
-        return ("\u2705 MUST BUY", "auto: watchlist match at or under your max (no price history yet)",
-                ("watchlist match", "bell", f"\u2705 Under your max - watchlist: {key}"))
+            why = f"auto: first price seen for '{key}', no history yet{cap}"
+            return UNVERIFIED, why, watch_alert(UNVERIFIED, key, why)
+        why = "auto: watchlist match at or under your max (no price history yet)"
+        return "\u2705 MUST BUY", why, watch_alert("\u2705 MUST BUY", key, why)
     low = min(prior, key=lambda h: h["price"])
     ratio = price / low["price"]
     seen = f"lowest seen ${low['price']:g}" + (f" at {low['store']}" if low["store"] else "") + \
@@ -187,10 +188,12 @@ def history_grade(price, match, did, history):
     else:
         verdict, how = "\u23f3 WAIT", f"{(ratio - 1) * 100:.0f}% above the"
     why = f"auto history: ${price:g} is {how} {seen}{cap}"
-    alert = None
-    if not over and not verdict.startswith("\u23f3"):
-        alert = ("watchlist deal", "bell", f"{verdict} - {key}: {how} {seen}")
-    return verdict, why, alert
+    return verdict, why, watch_alert(verdict, key, f"{how} {seen}{cap}")
+
+
+def watch_alert(verdict, key, detail):
+    """Every watchlist match alerts (Eva's rule), with its verdict so a WAIT is easy to ignore."""
+    return ("watchlist: " + key, "bell", f"{verdict} - {detail.removeprefix('auto: ').removeprefix('auto history: ')}")
 
 
 def new_history_rows(lines, history, today):
@@ -417,7 +420,10 @@ def grade(title, price, heat, match, purchases, history=None, did=""):
         by = f"by {p['claim_by']}" if p["claim_by"] else "(no price-adjust policy: return and rebuy)"
         msg = f"Claim ${p['paid'] - price:,.2f} back at {p['store'] or '?'} {by}"
         return "\u2705 MUST BUY", f"auto price-adjust: {msg}", ("price drop", "moneybag", f"{DROP} {msg}")
-    if match_keyword(match) and price is not None:  # watchlist item: graded against its price history
+    if match_keyword(match):  # watchlist item: graded against its price history, always alerts
+        if price is None:
+            why = "auto: watchlist match, no price in the title - open the link"
+            return UNVERIFIED, why, watch_alert(UNVERIFIED, match_keyword(match), why)
         return history_grade(price, match, did, history or {})
     if GLITCH_RE.search(title) and heat >= GLITCH_MIN_HEAT:
         return ("\U0001f525 CANNOT MISS", f"auto: possible price mistake, heat {heat:g} - may get cancelled",
