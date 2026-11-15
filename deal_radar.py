@@ -278,6 +278,79 @@ def backfill_categories(deals_ws, src_rows, lists):
     return filled
 
 
+def load_watchlist(sheet):
+    """Watchlist tab -> (active watch rules, {keyword: list name from column G})."""
+    watchlist, lists = [], {}
+    for r in sheet.worksheet("Watchlist").get_all_values()[1:]:
+        r = (r + [""] * 7)[:7]
+        if r[0].strip() and r[6].strip():
+            lists[r[0].strip().lower()] = r[6].strip()
+        if r[0].strip() and r[5].strip().upper() == "Y":
+            try:
+                mx = float(str(r[1]).replace("$", "").replace(",", "")) if r[1] else None
+            except ValueError:
+                mx = None
+            watchlist.append({"keyword": r[0].strip(), "max": mx, "must": r[2].strip(), "exclude": r[3]})
+    return watchlist, lists
+
+
+def write_rows_at_end(ws, rows, first_col_ids=None):
+    """Write rows starting in column A right after the last used row (columns A and B both checked).
+    Never use append_rows here: Sheets' table detection once started appends in column B,
+    shifting every new deal one column to the right (Nov 14, 2026). Returns the first row written."""
+    used = max(len(first_col_ids if first_col_ids is not None else ws.col_values(1)), len(ws.col_values(2)))
+    start = used + 1
+    need = start + len(rows) - 1
+    if need > ws.row_count:
+        ws.add_rows(need - ws.row_count + 100)
+    ws.update(values=rows, range_name=f"A{start}", value_input_option="RAW")
+    return start
+
+
+SHIFT_NOTE = "repaired (no alert)"
+
+
+def repair_shifted_rows(sheet, deals_ws):
+    """Self-heal rows that were written one column to the right (column A blank, Deal ID in column B):
+    move them back to column A, drop duplicates (same Deal ID seen earlier), re-check the watchlist,
+    re-grade them by the normal rules (without phone alerts) and refill Category / My List.
+    Costs two column reads when nothing is wrong. Returns the number of rows kept."""
+    col_a, col_b = deals_ws.col_values(1), deals_ws.col_values(2)
+    if len(col_b) <= len(col_a):
+        return 0
+    start, end = len(col_a) + 1, len(col_b)
+    if deals_ws.col_count < 21:
+        deals_ws.add_cols(21 - deals_ws.col_count)
+    vals = deals_ws.get_values(f"A{start}:U{end}")
+    watchlist, lists = load_watchlist(sheet)
+    src_cat = {r[0]: (r + [""] * 7)[6] for r in sheet.worksheet("Sources").get_all_values()[1:] if r}
+    _, history = load_history(sheet)
+    seen, out = set(col_a[1:]), []
+    for r in vals:
+        r = (list(r) + [""] * 21)[:21]
+        if r[0]:  # a normal row inside the block: keep as is
+            if r[0] not in seen:
+                seen.add(r[0])
+                out.append(r[:20])
+            continue
+        if not r[1]:
+            continue
+        base = r[1:9]  # id, found, source, title, store, price, heat, link
+        did, title = base[0], base[3]
+        if did in seen:
+            continue
+        seen.add(did)
+        price, heat = num(base[5]), num(base[6])
+        match = watch_match(title, price, watchlist)
+        verdict, why, _ = grade(title, price, heat, match, [], history, did)
+        out.append(base + [match, "Scored", verdict, "", "", "", why, SHIFT_NOTE, "", "",
+                           categorize(title, src_cat.get(base[2], "")), my_list(match, lists)])
+    blank = [[""] * 21] * (end - start + 1 - len(out))
+    deals_ws.update(values=[row + [""] for row in out] + blank, range_name=f"A{start}:U{end}",
+                    value_input_option="RAW")
+    return len(out)
+
+
 def new_history_rows(lines, history, today):
     """Rows to append to Price History: every graded watchlist match with a price that is not logged yet."""
     logged = {h["id"] for hs in history.values() for h in hs if h["id"]}
@@ -604,6 +677,7 @@ def run_once(sheet):
     now_dt = now_et()
     now = now_dt.strftime("%Y-%m-%d %H:%M")
     deals = sheet.worksheet("Deals")
+    repaired = repair_shifted_rows(sheet, deals)
     ids = deals.col_values(1)
     seen = set(ids[1:])
     heats, links, statuses = deals.col_values(7), deals.col_values(8), deals.col_values(10)
@@ -619,19 +693,7 @@ def run_once(sheet):
     copied = sync_bought(sheet, deals, now_dt)
     purchases = load_purchases(sheet, now_dt.date())
 
-    wl_rows = sheet.worksheet("Watchlist").get_all_values()[1:]
-    watchlist = []
-    lists = {}  # watch keyword -> list name (Watchlist column G, e.g. "Jackets", "Sarah PJs")
-    for r in wl_rows:
-        r = (r + [""] * 7)[:7]
-        if r[0].strip() and r[6].strip():
-            lists[r[0].strip().lower()] = r[6].strip()
-        if r[0].strip() and r[5].strip().upper() == "Y":
-            try:
-                mx = float(str(r[1]).replace("$", "").replace(",", "")) if r[1] else None
-            except ValueError:
-                mx = None
-            watchlist.append({"keyword": r[0].strip(), "max": mx, "must": r[2].strip(), "exclude": r[3]})
+    watchlist, lists = load_watchlist(sheet)
 
     src_ws = sheet.worksheet("Sources")
     src_rows = src_ws.get_all_values()
@@ -684,12 +746,8 @@ def run_once(sheet):
         time.sleep(3 if "reddit.com" in url else 1)  # be polite (Reddit rate-limits hard)
 
     first_new_row = len(ids) + 1
-    if all_rows:
-        resp = deals.append_rows(all_rows, value_input_option="RAW")  # RAW: titles like "+$15 bonus" stay text
-        # Sheets appends after the last used row in ANY column, so take the real start row from the reply.
-        m = re.search(r"!A(\d+)", resp.get("updates", {}).get("updatedRange", ""))
-        if m:
-            first_new_row = int(m.group(1))
+    if all_rows:  # RAW: titles like "+$15 bonus" stay text
+        first_new_row = write_rows_at_end(deals, all_rows, ids)
     if status_updates:
         src_ws.batch_update(status_updates)
     # Read row numbers BEFORE batch_update: gspread rewrites each range in place ("J12" -> "'Deals'!J12").
@@ -703,7 +761,7 @@ def run_once(sheet):
         deals.batch_update(grades, value_input_option="RAW")
     hist_rows = new_history_rows(lines, history, now_dt.strftime("%Y-%m-%d"))  # after grading: never vs itself
     if hist_rows:
-        hist_ws.append_rows(hist_rows, value_input_option="RAW")
+        write_rows_at_end(hist_ws, hist_rows)
     sent = notify(alerts)
     if sent:
         deals.batch_update([{"range": f"P{r}", "values": [[now]]} for r in sent])
@@ -713,6 +771,7 @@ def run_once(sheet):
     print(f"Added {len(all_rows)} rows ({graded} worth grading); "
           f"{len(upgrades) // 2} earlier rows got hot and were re-queued. Queue: {len(lines)} rows. "
           f"Auto-graded {len(grades) // 2} rows. Price history +{len(hist_rows)}. Categories backfilled: {backfilled}. "
+          f"Shifted rows repaired: {repaired}. "
           f"Phone alerts sent: {len(sent)} of {len(alerts)}.")
 
 

@@ -119,6 +119,77 @@ def test_my_list_names():
     assert d.my_list("", lists) == ""
 
 
+class _FakeWs:
+    def __init__(self, rows, title="Deals"):
+        self.rows, self.title, self.col_count, self.row_count = [list(r) for r in rows], title, 21, 50
+        self.writes = []
+
+    def col_values(self, c):
+        col = [(r + [""] * 25)[c - 1] for r in self.rows]
+        while col and not col[-1]:
+            col.pop()
+        return col
+
+    def get_values(self, rng):
+        import re as _re
+        a, b = map(int, _re.findall(r"(\d+)", rng))
+        return [list(r) for r in self.rows[a - 1:b]]
+
+    def get_all_values(self):
+        return [list(r) for r in self.rows]
+
+    def add_cols(self, n):
+        self.col_count += n
+
+    def add_rows(self, n):
+        self.row_count += n
+
+    def update(self, values, range_name, value_input_option=None):
+        import re as _re
+        start = int(_re.search(r"(\d+)", range_name).group(1))
+        self.writes.append(range_name)
+        for k, v in enumerate(values):
+            while len(self.rows) < start + k:
+                self.rows.append([])
+            self.rows[start - 1 + k] = list(v)
+
+
+class _FakeSheet:
+    def __init__(self, tabs):
+        self.tabs = tabs
+
+    def worksheet(self, name):
+        return self.tabs[name]
+
+
+def test_repair_shifted_rows_moves_back_dedupes_and_regrades():
+    head = ["Deal ID", "Found At"] + [""] * 18
+    ok = ["a1", "2026-11-14 19:51", "Src", "Old deal $5", "", "5", "1", "https://x/1", "", "Low"]
+    shifted = ["", "b2", "2026-11-14 20:59", "Slickdeals Frontpage", "Patagonia Nano Puff Jacket $99", "", "99", "40",
+               "https://x/2", "Scored", "\U0001f525 CANNOT MISS"]
+    dup = ["", "b2", "2026-11-14 21:15", "Slickdeals Frontpage", "Patagonia Nano Puff Jacket $99", "", "99", "40",
+           "https://x/2"]
+    dup_old = ["", "a1", "2026-11-14 21:15", "Src", "Old deal $5", "", "5", "1", "https://x/1"]
+    deals = _FakeWs([head, ok, shifted, dup, dup_old])
+    sheet = _FakeSheet({"Deals": deals,
+                        "Watchlist": _FakeWs([["k"], ["nano puff", "150", "", "", "", "Y", "Eva jackets"]]),
+                        "Sources": _FakeWs([["Name"], ["Slickdeals Frontpage", "u", "", "Y", "", "", "Deals"]]),
+                        "Price History": _FakeWs([d.HISTORY_HEADER, ["nano puff", "2026-11-01", "137", "REI", "", "", "", ""]])})
+    assert d.repair_shifted_rows(sheet, deals) == 1
+    row = deals.rows[2]
+    assert row[:8] == ["b2", "2026-11-14 20:59", "Slickdeals Frontpage", "Patagonia Nano Puff Jacket $99", "", "99",
+                       "40", "https://x/2"]
+    assert row[8] == "nano puff ✓" and row[9] == "Scored" and row[10].startswith("\U0001f525")  # 99 vs low 137
+    assert row[15] == d.SHIFT_NOTE and row[18] == "Clothing & Shoes" and row[19] == "Eva jackets"
+    assert all(not any(r) for r in deals.rows[3:])  # duplicates cleared
+    assert d.repair_shifted_rows(sheet, deals) == 0  # nothing left to fix
+
+
+def test_write_rows_at_end_starts_in_column_a():
+    ws = _FakeWs([["Deal ID", "Found At"], ["a", "t"], ["", "b"]])
+    assert d.write_rows_at_end(ws, [["c", "t2"]]) == 4 and ws.writes == ["A4"]
+
+
 def test_rule3_heat_tiers():
     v, _, alert = _grade("TV $500", 500, d.HOT_HEAT)
     assert v.startswith("\U0001f525") and alert is None  # 🔥 in the sheet, but no alert below ALERT_HEAT
