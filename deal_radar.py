@@ -55,7 +55,8 @@ SHEET_ID_FILE = os.path.join(HERE, "sheet_id.txt")
 USER_AGENT = "DealRadar/1.0 (personal deal tracker)"
 # Grading rules are per source, on the Sources tab: G Category, H Min heat, I Min price,
 # J "Grade if title has" (comma list), K Every (min) = how often to pull it (blank = every run). A row is queued for Claude (Status New) when it matches
-# the Watchlist, or heat >= H, or price >= I, or its title contains a J word. Otherwise "Low".
+# the Watchlist (any price), or heat >= H, or price >= I, or its title contains a J word. Otherwise "Low".
+# Watchlist max price is now only a cap: matches over it are still graded and logged, but never alert.
 DEFAULT_MIN_HEAT = 40    # used when H is blank
 MAX_AGE_DAYS = 3         # older posts are logged as Low (often already expired)
 SKIP_UNDER = 15          # tiny-ticket deals are logged but not graded (saves tokens),
@@ -123,8 +124,89 @@ def watch_match(title, price, watchlist):
             continue
         if w["max"] and price and price > w["max"]:
             return f"{w['keyword']} (over max ${w['max']:g})"
-        return f"{w['keyword']} \u2713"
+        return f"{w['keyword']} \u2713" + ("" if w["max"] else NO_MAX)
     return ""
+
+
+NO_MAX = " (no max)"
+HISTORY_TAB = "Price History"
+HISTORY_HEADER = ["Product (watch keyword)", "Date", "Price", "Store", "Title", "Deal ID", "Link", "Note"]
+# History grading (watchlist items): compare the price to the lowest price Deal Radar has seen for the same
+# watch keyword (= same or similar product). Ratios are price / lowest seen.
+HIST_FIRE = 0.90         # 10%+ under the lowest seen: 🔥 CANNOT MISS
+HIST_LOW = 1.02          # within 2% of the lowest seen (or a new low): 🟢 ALL-TIME LOW
+HIST_MUST = 1.05         # within 5%: ✅ MUST BUY; more than 5% above: ⏳ WAIT
+
+
+def match_keyword(match):
+    """'nano puff ✓' / 'nano puff (over max $150)' / 'x ✓ (no max)' -> 'nano puff'. Purchase drops -> ''."""
+    if not match or match.startswith("\U0001f4b8"):
+        return ""
+    return match.split(" (")[0].replace("\u2713", "").strip().lower()
+
+
+def load_history(sheet):
+    """Price History tab -> (worksheet, {keyword: [{price, date, store, id}]}). Creates the tab if missing.
+    Rows can also be typed in by hand (e.g. a known sale price); Deal ID may then be blank."""
+    try:
+        ws = sheet.worksheet(HISTORY_TAB)
+    except Exception:
+        ws = sheet.add_worksheet(title=HISTORY_TAB, rows=1000, cols=len(HISTORY_HEADER))
+        ws.update(values=[HISTORY_HEADER], range_name="A1")
+        return ws, {}
+    hist = {}
+    for r in ws.get_all_values()[1:]:
+        r = (r + [""] * 8)[:8]
+        price = num(r[2])
+        if r[0].strip() and price:
+            hist.setdefault(r[0].strip().lower(), []).append(
+                {"price": price, "date": r[1].strip(), "store": r[3].strip(), "id": r[5].strip()})
+    return ws, hist
+
+
+def history_grade(price, match, did, history):
+    """Grade a watchlist match against its price history. Returns (verdict, why, alert) like grade()."""
+    key = match_keyword(match)
+    over = "over max" in match
+    cap = f" - over your max {match.split('over max ')[1].rstrip(')')}" if over else ""
+    prior = [h for h in history.get(key, []) if not (did and h["id"] == did)]
+    if not prior:
+        if over or NO_MAX in match:
+            return UNVERIFIED, f"auto: first price seen for '{key}', no history yet{cap}", None
+        return ("\u2705 MUST BUY", "auto: watchlist match at or under your max (no price history yet)",
+                ("watchlist match", "bell", f"\u2705 Under your max - watchlist: {key}"))
+    low = min(prior, key=lambda h: h["price"])
+    ratio = price / low["price"]
+    seen = f"lowest seen ${low['price']:g}" + (f" at {low['store']}" if low["store"] else "") + \
+           (f" on {low['date']}" if low["date"] else "") + f"; {len(prior)} price(s) tracked"
+    if ratio <= HIST_FIRE:
+        verdict, how = "\U0001f525 CANNOT MISS", f"{(1 - ratio) * 100:.0f}% under the"
+    elif ratio <= HIST_LOW:
+        verdict, how = "\U0001f7e2 ALL-TIME LOW", "at the" if ratio > 1 else "new low vs the"
+    elif ratio <= HIST_MUST:
+        verdict, how = "\u2705 MUST BUY", f"{(ratio - 1) * 100:.0f}% above the"
+    else:
+        verdict, how = "\u23f3 WAIT", f"{(ratio - 1) * 100:.0f}% above the"
+    why = f"auto history: ${price:g} is {how} {seen}{cap}"
+    alert = None
+    if not over and not verdict.startswith("\u23f3"):
+        alert = ("watchlist deal", "bell", f"{verdict} - {key}: {how} {seen}")
+    return verdict, why, alert
+
+
+def new_history_rows(lines, history, today):
+    """Rows to append to Price History: every graded watchlist match with a price that is not logged yet."""
+    logged = {h["id"] for hs in history.values() for h in hs if h["id"]}
+    out = []
+    for ln in lines:
+        did, title, store, price, link, match = str(ln[1]), str(ln[4]), str(ln[5]), num(ln[6]), str(ln[8]), str(ln[9])
+        key = match_keyword(match)
+        if not key or price is None or did in logged or DEAD_RE.search(title):
+            continue
+        out.append([key, today, price, store, title[:150], did, link, "auto"])
+        logged.add(did)
+        history.setdefault(key, []).append({"price": price, "date": today, "store": store, "id": did})
+    return out
 
 
 def num(x):
@@ -270,7 +352,7 @@ def write_queue(sheet, deals_ws, statuses, first_new_row, all_rows, upgraded_row
 
 def triage(rule, title, price, heat, match):
     """Decide whether Claude should spend tokens grading this row."""
-    if match and "over max" not in match:
+    if match:  # every watchlist match is graded (vs price history), over max or not
         return "New"
     t = title.lower()
     if any(w in t for w in rule["words"]):
@@ -314,7 +396,7 @@ def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=
         price = parse_price(title)
         match = purchase_match(title, price, purchases) or watch_match(title, price, watchlist)
         status = triage(rule, title, price, heat, match)
-        if status == "New" and (stale or (first_pull and not (match and "over max" not in match))):
+        if status == "New" and (stale or (first_pull and not match)):
             status = "Low"  # old post (likely expired), or backlog from a brand-new feed: log, don't grade
         rows.append([did, now, source, title[:200], parse_store(summary, link), price if price is not None else "",
                      heat if heat is not None else "", link, match, status, "", "", "", "", "", "", "", ""])
@@ -329,8 +411,9 @@ DROP = "\U0001f4b8"
 UNVERIFIED = "\u2753 UNVERIFIED"
 
 
-def grade(title, price, heat, match, purchases):
-    """Free rule-based verdict. Returns (verdict, why, alert); alert = (ntfy title, ntfy tags, message) or None."""
+def grade(title, price, heat, match, purchases, history=None, did=""):
+    """Free rule-based verdict. Returns (verdict, why, alert); alert = (ntfy title, ntfy tags, message) or None.
+    history: Price History by watch keyword; watchlist matches are graded against it."""
     heat = heat or 0
     if DEAD_RE.search(title):  # checked first so a dead deal never alerts
         return "\U0001f44e BAD", "auto: title says expired / out of stock", None
@@ -339,9 +422,8 @@ def grade(title, price, heat, match, purchases):
         by = f"by {p['claim_by']}" if p["claim_by"] else "(no price-adjust policy: return and rebuy)"
         msg = f"Claim ${p['paid'] - price:,.2f} back at {p['store'] or '?'} {by}"
         return "\u2705 MUST BUY", f"auto price-adjust: {msg}", ("price drop", "moneybag", f"{DROP} {msg}")
-    if "\u2713" in match and price is not None:  # ✓ = within max with must-include; no price = max unchecked
-        return ("\u2705 MUST BUY", "auto: watchlist match at or under max price",
-                ("watchlist match", "bell", f"\u2705 Must Buy - watchlist: {match}"))
+    if match_keyword(match) and price is not None:  # watchlist item: graded against its price history
+        return history_grade(price, match, did, history or {})
     if GLITCH_RE.search(title) and heat >= GLITCH_MIN_HEAT:
         return ("\U0001f525 CANNOT MISS", f"auto: possible price mistake, heat {heat:g} - may get cancelled",
                 ("price mistake", "rotating_light", "\U0001f525 Possible price mistake - may get cancelled"))
@@ -350,7 +432,7 @@ def grade(title, price, heat, match, purchases):
                 ("hot deal", "fire", f"\U0001f525 Extreme heat deal (heat {heat:g})") if heat >= ALERT_HEAT else None)
     if heat >= GOOD_HEAT:
         return "\U0001f44d GOOD", f"auto: hot, heat {heat:g}", None
-    return UNVERIFIED, "auto", None  # never 🟢 All-Time Low: we have no price history
+    return UNVERIFIED, "auto", None  # 🟢 only comes from Price History (watchlist items)
 
 
 def is_auto_unverified(verdict, why):
@@ -361,7 +443,7 @@ def cell(col, row):
     return col[row - 1] if row - 1 < len(col) else ""
 
 
-def auto_grade(lines, verdicts, whys, alerted, purchases, now_dt):
+def auto_grade(lines, verdicts, whys, alerted, purchases, now_dt, history=None):
     """Grade Queue lines ([row, A..I]) whose Verdict is blank or an earlier auto ❓; manual verdicts are never touched.
     Returns (sheet updates, alerts). Alerts skip rows already alerted (column P) or found too long ago."""
     updates, alerts = [], []
@@ -370,7 +452,7 @@ def auto_grade(lines, verdicts, whys, alerted, purchases, now_dt):
         old_v, old_why = cell(verdicts, row), cell(whys, row)
         if old_v.strip() and not is_auto_unverified(old_v, old_why):
             continue
-        verdict, why, alert = grade(title, price, heat, match, purchases)
+        verdict, why, alert = grade(title, price, heat, match, purchases, history, str(ln[1]))
         updates.append({"range": f"J{row}:K{row}", "values": [["Scored", verdict]]})
         updates.append({"range": f"O{row}", "values": [[why]]})
         try:
@@ -526,9 +608,13 @@ def run_once(sheet):
     if upgrades:
         deals.batch_update(upgrades)
     lines = write_queue(sheet, deals, statuses, first_new_row, all_rows, upgraded_rows)
-    grades, alerts = auto_grade(lines, verdicts, whys, alerted, purchases, now_dt)
+    hist_ws, history = load_history(sheet)
+    grades, alerts = auto_grade(lines, verdicts, whys, alerted, purchases, now_dt, history)
     if grades:  # verdicts are saved before alerting, so a failed run can never alert the same deal twice
         deals.batch_update(grades, value_input_option="RAW")
+    hist_rows = new_history_rows(lines, history, now_dt.strftime("%Y-%m-%d"))  # after grading: never vs itself
+    if hist_rows:
+        hist_ws.append_rows(hist_rows, value_input_option="RAW")
     sent = notify(alerts)
     if sent:
         deals.batch_update([{"range": f"P{r}", "values": [[now]]} for r in sent])
@@ -537,7 +623,8 @@ def run_once(sheet):
           f"Watching {len(purchases)} purchases for price drops ({copied} newly copied from Deals).")
     print(f"Added {len(all_rows)} rows ({graded} worth grading); "
           f"{len(upgrades) // 2} earlier rows got hot and were re-queued. Queue: {len(lines)} rows. "
-          f"Auto-graded {len(grades) // 2} rows. Phone alerts sent: {len(sent)} of {len(alerts)}.")
+          f"Auto-graded {len(grades) // 2} rows. Price history +{len(hist_rows)}. "
+          f"Phone alerts sent: {len(sent)} of {len(alerts)}.")
 
 
 def main():

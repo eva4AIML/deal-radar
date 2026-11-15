@@ -1,7 +1,7 @@
 # Deal Radar 2026 — always-on deal scanner (for Claude and for Eva/Sumit)
 
 Live list: Google Sheet "Deal Radar 2026" (private; ID kept in the GitHub secret SHEET_ID).
-Tabs: Deals (A Deal ID … R Bought?), Watchlist (keyword, max price, must, exclude, notes, Active Y/N), Sources (feeds + rules), How it works.
+Tabs: Deals (A Deal ID … R Bought?), Price History (keyword, date, price, store, title, deal ID, link, note), Watchlist (keyword, max price, must, exclude, notes, Active Y/N), Sources (feeds + rules), How it works.
 
 ## Architecture (built to save tokens)
 1. COLLECT — deal_radar.py (Python, feedparser + gspread). Free; no AI. Runs on GitHub Actions in a PUBLIC repo (deal-radar.yml, every 15 min; unlimited free minutes). ~208 sources. Sources K 'Every (min)': main feeds + Amazon/Best Buy/Walmart/Target searches every run; category searches every 60 min; Reddit every 30. Normal run ≈ 1 min, hourly run ≈ 7 min (timeout 14, never two at once). Times are written in Eastern.
@@ -14,15 +14,15 @@ Tabs: Deals (A Deal ID … R Bought?), Watchlist (keyword, max price, must, excl
 2. GRADE (free, no AI) — the collector auto-grades every queued row whose Verdict is blank (never overwrites a manual verdict) and writes "auto…" in Why, Status = Scored. Rules, in order (thresholds are constants at the top of deal_radar.py):
    - Title says expired / OOS / out of stock / sold out / [dead] → 👎 BAD (checked first, so dead deals never alert).
    - 💸 cheaper than a Purchases row still in its claim window → ✅ MUST BUY, Why "auto price-adjust: Claim $X back at <store> by <claim-by>" + alert.
-   - ✓ watchlist match at/under Max price with Must-include (price must be known) → ✅ MUST BUY + alert.
+   - Watchlist match with a known price → graded against the Price History tab (lowest price seen for the same watch keyword, i.e. same or similar product): ≥10% under → 🔥, within 2% (or new low) → 🟢, within 5% → ✅ (all + alert); more than 5% above → ⏳ WAIT (no alert). Max price is only a cap: over it is still graded and logged but never alerts. No history yet: ✅ + alert if at/under max, ❓ if over max or no max. Every watchlist match's price is appended to Price History after grading (Note = auto); hand-typed rows (e.g. known sale prices) count too.
    - Title says price mistake/glitch/error and heat ≥ 25 → 🔥 CANNOT MISS + alert ("may get cancelled").
    - Heat ≥ 100 → 🔥 CANNOT MISS (alert only at heat ≥ 300, ALERT_HEAT); heat ≥ 50 → 👍 GOOD (no alert).
-   - Else ❓ UNVERIFIED. Never 🟢 All-Time Low (no price history). An auto ❓ that later gets hot is re-queued and re-graded.
+   - Else ❓ UNVERIFIED. 🟢 only comes from Price History (watchlist items). An auto ❓ that later gets hot is re-queued and re-graded.
    Alerts: max 10 per run, only for rows found within 3 days, and Deals P Alerted is stamped so a deal is never alerted twice.
 2x. OPTIONAL CLAUDE GRADER (not needed now) — Claude scheduled tasks "Deal Radar grader" (PAUSED since Nov 7; resume on request). Grades New rows, writes Verdict/Confidence/All-Time Low/Why, Status = Scored. Category rules (gold premium over spot, jewelry, beauty events, local grocery roundups, services 12-month cost, cars via CarGurus, in-store YMMV) are on 'How it works' A23:A31 — add "follow 'How it works' category rules" to the grader prompts when resuming.
 2b. PRICE-DROP REFUNDS — Purchases tab (Item, Match words, Store dropdown, Bought on, Price paid, link) + Store policies tab (verified Nov 14: Best Buy 15 days, holiday purchases Oct 30–Dec 31 → claim by Jan 15 2027; Target 14 days, holiday Nov 1 → Dec 24; Costco 30; Apple 14; Lowe's 30; Home Depot 14 (sources differ); Kohl's 14 (unverified); Walmart/Amazon none → return-and-rebuy). Claim by / Days left / Drop $ are formulas. Collector: flags new deals cheaper than a purchase (💸 in Watch Match → New) and copies Deals rows marked Bought? = Y into Purchases. Grader: price-checks purchases on the first run of each day and alerts '💸 CLAIM $X … by <date>'.
 2c. QUEUE — the collector rewrites a small Queue tab (rows to grade, max 150) every run; graders read only Queue, never the whole Deals tab (big token saving). Grader prompts updated Nov 14 to use Queue + category rules + price drops (still PAUSED).
-2d. PHONE ALERTS (collector, no AI) — if the repo secret NTFY_TOPIC is set, each run pushes up to 10 alerts to the ntfy app (ntfy.sh/<topic>) for rows the auto-grader marks with an alert (only: ✓ watchlist match at/under max, 💸 price drop, price mistake/glitch, or heat ≥ 300). Subscribe to the same topic in the ntfy app. The topic name works like a password: keep it secret.
+2d. PHONE ALERTS (collector, no AI) — if the repo secret NTFY_TOPIC is set, each run pushes up to 10 alerts to the ntfy app (ntfy.sh/<topic>) for rows the auto-grader marks with an alert (only: watchlist 🔥/🟢/✅ vs price history (never over max), 💸 price drop, price mistake/glitch, or heat ≥ 300). Subscribe to the same topic in the ntfy app. The topic name works like a password: keep it secret.
 3. ALERT — push notification for 🔥/🟢 (High/Med confidence) or a ✓ watchlist match that isn't WAIT/BAD.
 
 ## Categories covered (Sources tab, added Nov 14)
