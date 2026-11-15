@@ -56,11 +56,10 @@ USER_AGENT = "DealRadar/1.0 (personal deal tracker)"
 # Grading rules are per source, on the Sources tab: G Category, H Min heat, I Min price,
 # J "Grade if title has" (comma list), K Every (min) = how often to pull it (blank = every run). A row is queued for Claude (Status New) when it matches
 # the Watchlist (any price), or heat >= H, or price >= I, or its title contains a J word. Otherwise "Low".
+# Price never filters a deal out: every deal found is written to Deals, and cheap deals are graded like any other.
 # Watchlist max price is now only a cap: matches over it are still graded and logged, but never alert.
 DEFAULT_MIN_HEAT = 40    # used when H is blank
 MAX_AGE_DAYS = 3         # older posts are logged as Low (often already expired)
-SKIP_UNDER = 15          # tiny-ticket deals are logged but not graded (saves tokens),
-                         # unless the title has one of the source's J words (e.g. "free")
 
 # Auto-grading (free rules, no Claude). Only rows with a blank Verdict (or an earlier auto ❓) are graded;
 # every auto verdict has "auto" in the Why column so manual verdicts are easy to tell apart.
@@ -357,8 +356,6 @@ def triage(rule, title, price, heat, match):
     t = title.lower()
     if any(w in t for w in rule["words"]):
         return "New"
-    if price is not None and price < SKIP_UNDER:
-        return "Low"
     if heat is not None and rule["min_heat"] is not None and heat >= rule["min_heat"]:
         return "New"
     if rule["min_price"] is not None and (price or 0) >= rule["min_price"]:
@@ -382,9 +379,7 @@ def entries_to_rows(source, rule, feed, watchlist, seen, known, now, first_pull=
         stale = pub is not None and calendar.timegm(pub) < cutoff
         if did in seen or (key and key in known):
             k = known.get(key)
-            price = parse_price(clean(e.get("title", "")))
-            cheap = price is not None and price < SKIP_UNDER  # tiny-ticket deals stay Low even when hot
-            if (upgrades is not None and k and k[0] and k[1] == "Low" and heat is not None and not stale and not cheap
+            if (upgrades is not None and k and k[0] and k[1] == "Low" and heat is not None and not stale
                     and rule["min_heat"] is not None and heat >= rule["min_heat"] > (num(k[2]) or 0)):
                 upgrades.append({"range": f"G{k[0]}", "values": [[heat]]})
                 upgrades.append({"range": f"J{k[0]}", "values": [["New"]]})

@@ -30,8 +30,13 @@ def test_heat_recheck_requeues_hot_deal():
                                                        {"range": "J7", "values": [["New"]]}]
 
 
-def test_heat_recheck_skips_deals_under_skip_under():
-    assert _hot_low_row_upgrades(f"Socks ${d.SKIP_UNDER - 1}") == []
+def test_heat_recheck_includes_cheap_deals():  # price never filters a deal
+    assert _hot_low_row_upgrades("Socks $5") == [{"range": "G7", "values": [[60]]},
+                                                 {"range": "J7", "values": [["New"]]}]
+
+
+def test_cheap_hot_deal_is_graded_not_low():
+    assert d.triage(d.make_rule([]), "Socks $5", 5, 60, "") == "New"
 
 
 PURCHASES = [{"item": "Sony XM5", "store": "Best Buy", "paid": 349.0, "words": ["sony", "xm5"],
